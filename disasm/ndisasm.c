@@ -23,7 +23,9 @@ const char *_progname;
 static int bpl = 8;             /* bytes per line of hex dump */
 
 static void output_ins(uint64_t, const uint8_t *, int, const char *);
+static void output_bytes(uint32_t nextsync, char* bytes, unsigned int synclen);
 static void skip(uint32_t dist, FILE * fp);
+static void skipstore(uint32_t dist, FILE * fp, char* store);
 
 int main(int argc, char **argv)
 {
@@ -271,10 +273,11 @@ int main(int argc, char **argv)
         if ((nextsync || synclen) &&
 	    (uint32_t)offset == nextsync) {
             if (synclen) {
-                fprintf(stdout, "%08"PRIX64"  skipping 0x%"PRIX32" bytes\n",
-			offset, synclen);
                 offset += synclen;
-                skip(synclen, fp);
+                char* bytes = malloc(synclen);
+                skipstore(synclen, fp, bytes);
+                output_bytes(nextsync, bytes, synclen);
+                free(bytes);
             }
             q = p = buffer;
             nextsync = next_sync(offset, &synclen);
@@ -304,20 +307,58 @@ int main(int argc, char **argv)
     return 0;
 }
 
+static bool is_string(char c) {
+    return (c >= 32 && c < 127);
+}
+static void output_bytes(uint32_t nextsync, char* bytes, unsigned int synclen)
+{
+    bool newLine = true;
+    for (unsigned int bi = 0; bi < synclen; ++bi) {
+        unsigned int bj = bi;
+        for (; bj < synclen; ++bj) {
+            if (!is_string(bytes[bj]))
+                break;
+        }
+        if (bj - bi > 4) {
+            if (bi != 0) {
+                fprintf(stdout, "\n");
+            }
+            fprintf(stdout, "l%08"PRIX64": db \"", nextsync + (uint64_t)bi);
+            for (unsigned int bk = bi; bk < bj; ++bk)
+                fprintf(stdout, "%c", bytes[bk]);
+            fprintf(stdout, "\"");
+            bi = bj - 1;
+            newLine = true;
+        } else {
+            uint8_t byte = bytes[bi];
+            if (newLine) {
+                newLine = false;
+                if (bi != 0) {
+                    fprintf(stdout, "\n");
+                }
+                fprintf(stdout, "l%08"PRIX64": db ", nextsync + (uint64_t)bi);
+                fprintf(stdout, "0x%02X", byte);
+            } else {
+                fprintf(stdout, ",0x%02X", byte);
+            }
+        }
+    }
+    fprintf(stdout, "\n");
+}
+
 static void output_ins(uint64_t offset, const uint8_t *data,
                        int datalen, const char *insn)
 {
     int bytes;
-    fprintf(stdout, "%08"PRIX64"  ", offset);
+    fprintf(stdout, "l%08"PRIX64": ", offset);
 
     bytes = 0;
     while (datalen > 0 && bytes < bpl) {
-        fprintf(stdout, "%02X", *data++);
         bytes++;
         datalen--;
     }
 
-    fprintf(stdout, "%*s%s\n", (bpl + 1 - bytes) * 2, "", insn);
+    fprintf(stdout, "%s\n", insn);
 
     while (datalen > 0) {
         fprintf(stdout, "         -");
@@ -337,6 +378,10 @@ static void output_ins(uint64_t offset, const uint8_t *data,
  */
 static void skip(uint32_t dist, FILE * fp)
 {
+    skipstore(dist, fp, NULL);
+}
+static void skipstore(uint32_t dist, FILE * fp, char* store)
+{
     char buffer[256];           /* should fit on most stacks :-) */
 
     /*
@@ -344,13 +389,21 @@ static void skip(uint32_t dist, FILE * fp)
      * doesn't approve of SEEK_CUR. So I'll use SEEK_SET and
      * ftell... horrible but apparently necessary.
      */
-    if (fseek(fp, dist + ftell(fp), SEEK_SET)) {
+    if (store != NULL || fseek(fp, dist + ftell(fp), SEEK_SET)) {
         while (dist > 0) {
             uint32_t len = (dist < sizeof(buffer) ?
                                  dist : sizeof(buffer));
-            if (fread(buffer, 1, len, fp) < len) {
+            char* target = buffer;
+            if (store != NULL) {
+                target = store;
+            }
+            unsigned int sz = fread(target, 1, len, fp);
+            if (sz < len) {
                 perror("fread");
                 exit(1);
+            }
+            if (store != NULL) {
+                store += sz;
             }
             dist -= len;
         }
